@@ -770,6 +770,14 @@ public class ConcurrentHashMap<K,V> extends AbstractMap<K,V>
      * The array of bins. Lazily initialized upon first insertion.
      * Size is always a power of two. Accessed directly by iterators.
      */
+    /**
+     * volatile
+     * 保证了不同线程对这个变量进行操作时的可见性，即一个线程修改了某个变量的值，这新值对其他线程来说是立即可见的。（实现可见性）
+     *
+     * 禁止进行指令重排序。（实现有序性）
+     *
+     * volatile 只能保证对单次读/写的原子性。i++ 这种操作不能保证原子性。
+     */
     transient volatile Node<K,V>[] table;
 
     /**
@@ -933,13 +941,16 @@ public class ConcurrentHashMap<K,V> extends AbstractMap<K,V>
      */
     public V get(Object key) {
         Node<K,V>[] tab; Node<K,V> e, p; int n, eh; K ek;
+        //根据计算出来的 hashcode 寻址，如果就在桶上那么直接返回值。
         int h = spread(key.hashCode());
         if ((tab = table) != null && (n = tab.length) > 0 &&
             (e = tabAt(tab, (n - 1) & h)) != null) {
+            //如果是红黑树那就按照树的方式获取值。
             if ((eh = e.hash) == h) {
                 if ((ek = e.key) == key || (ek != null && key.equals(ek)))
                     return e.val;
             }
+            //不满足那就按照链表的方式遍历获取值。
             else if (eh < 0)
                 return (p = e.find(h, key)) != null ? p.val : null;
             while ((e = e.next) != null) {
@@ -1008,21 +1019,33 @@ public class ConcurrentHashMap<K,V> extends AbstractMap<K,V>
 
     /** Implementation for put and putIfAbsent */
     final V putVal(K key, V value, boolean onlyIfAbsent) {
+        //这就是 ConcurrentHashMap 为什么 key vaule 不能为空的原因
         if (key == null || value == null) throw new NullPointerException();
+        //1、根据 key 计算出 hashcode 。
         int hash = spread(key.hashCode());
         int binCount = 0;
+        //table volatile修饰
         for (Node<K,V>[] tab = table;;) {
             Node<K,V> f; int n, i, fh;
+            //2、判断是否需要进行初始化。
             if (tab == null || (n = tab.length) == 0)
+                //初始化
                 tab = initTable();
             else if ((f = tabAt(tab, i = (n - 1) & hash)) == null) {
+                //3、当前 key 定位出的 Node，如果为空表示当前位置可以写入数据，利用 CAS 尝试写入，失败则自旋保证成功。
+                /**
+                 * CAS 是乐观锁的一种实现方式，是一种轻量级锁，JUC 中很多工具类的实现就是基于 CAS 的。线程在读取数据时不进行加锁，在准备写回数据时，比较原值是否修改，若未被其他线程修改则写回，若已被修改，则重新执行读取流程。这是一种乐观策略，认为并发操作并不总会发生。
+                 * 针对 synchronized 获取锁的方式，JVM 使用了锁升级的优化方式，就是先使用偏向锁优先同一线程然后再次获取锁，如果失败，就升级为 CAS 轻量级锁，如果失败就会短暂自旋，防止线程被系统挂起。最后如果以上都失败就升级为重量级锁。
+                 */
                 if (casTabAt(tab, i, null,
                              new Node<K,V>(hash, key, value, null)))
                     break;                   // no lock when adding to empty bin
             }
+            //4、如果当前位置的 hashcode == MOVED == -1,则需要进行扩容。
             else if ((fh = f.hash) == MOVED)
                 tab = helpTransfer(tab, f);
             else {
+                //5、如果都不满足，则利用 synchronized 锁写入数据。
                 V oldVal = null;
                 synchronized (f) {
                     if (tabAt(tab, i) == f) {
@@ -1059,6 +1082,7 @@ public class ConcurrentHashMap<K,V> extends AbstractMap<K,V>
                     }
                 }
                 if (binCount != 0) {
+                    //6、如果数量大于 TREEIFY_THRESHOLD 则要转换为红黑树。
                     if (binCount >= TREEIFY_THRESHOLD)
                         treeifyBin(tab, i);
                     if (oldVal != null)
